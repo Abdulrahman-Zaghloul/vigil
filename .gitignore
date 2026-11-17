@@ -1,0 +1,26 @@
+# Python leftovers: generated automatically, rebuilt any time
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+
+# Virtual environments: each machine builds its own
+.venv/
+venv/
+
+# Secrets and local settings: NEVER commit these
+.env
+
+# Tool caches
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# Editor and operating-system files
+.vscode/
+.idea/
+Thumbs.db
+.DS_Store
