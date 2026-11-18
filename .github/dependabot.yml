@@ -1,0 +1,9 @@
+version: 2
+updates:
+  # Keeps the pinned GitHub Actions current: opens a pull request when a new release ships.
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: monthly
+    commit-message:
+      prefix: ci

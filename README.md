@@ -1,5 +1,7 @@
 # Vigil
 
+[![CI](https://github.com/Abdulrahman-Zaghloul/vigil/actions/workflows/ci.yml/badge.svg)](https://github.com/Abdulrahman-Zaghloul/vigil/actions/workflows/ci.yml)
+
 A lightweight threat-detection engine. Vigil reads security logs, spots attacks
 such as SSH brute-force and password spraying, and raises alerts mapped to
 [MITRE ATT&CK](https://attack.mitre.org/).
@@ -10,7 +12,7 @@ such as SSH brute-force and password spraying, and raises alerts mapped to
 
 - [x] Repository foundation
 - [x] Python project skeleton and first test
-- [ ] Continuous integration on every push
+- [x] Continuous integration on every push
 - [ ] SSH authentication log parser
 - [ ] Brute-force detection
 - [ ] Rule engine with MITRE ATT&CK mapping
