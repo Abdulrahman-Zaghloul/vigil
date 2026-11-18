@@ -9,7 +9,7 @@ such as SSH brute-force and password spraying, and raises alerts mapped to
 ## Roadmap
 
 - [x] Repository foundation
-- [ ] Python project skeleton and first test
+- [x] Python project skeleton and first test
 - [ ] Continuous integration on every push
 - [ ] SSH authentication log parser
 - [ ] Brute-force detection
@@ -23,6 +23,20 @@ such as SSH brute-force and password spraying, and raises alerts mapped to
 - [ ] Web attack detection
 - [ ] Docker and attack-replay demo
 - [ ] Threat model and design records
+
+## Development
+
+Requires Python 3.12 or newer.
+
+```bash
+python -m venv .venv
+# Windows: .venv\Scripts\activate    macOS/Linux: source .venv/bin/activate
+pip install -e ".[dev]"
+
+pytest          # run the tests
+ruff check .    # lint: style and common bugs
+mypy            # static type checking
+```
 
 ## License
 
