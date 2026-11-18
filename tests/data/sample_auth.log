@@ -1,0 +1,10 @@
+2026-11-17T03:14:01.004512+00:00 web-01 CRON[2190]: pam_unix(cron:session): session opened for user root(uid=0) by root(uid=0)
+2026-11-17T03:14:07.118403+00:00 web-01 sshd[2211]: Invalid user admin from 203.0.113.45 port 52150
+2026-11-17T03:14:07.402318+00:00 web-01 sshd[2211]: Failed password for invalid user admin from 203.0.113.45 port 52150 ssh2
+2026-11-17T03:14:09.771029+00:00 web-01 sshd[2213]: Failed password for root from 203.0.113.45 port 52154 ssh2
+2026-11-17T03:14:11.230554+00:00 web-01 sshd[2215]: Failed password for root from 203.0.113.45 port 52160 ssh2
+2026-11-17T03:14:13.904101+00:00 web-01 sshd[2215]: Connection closed by authenticating user root 203.0.113.45 port 52160 [preauth]
+2026-11-17T03:15:22.661870+00:00 web-01 sshd-session[2301]: Accepted publickey for deploy from 198.51.100.8 port 50122 ssh2: ED25519 SHA256:3q2v7w9Zl1nYbLk0fJcV8aTzR4mHxQeU5sDiPoGvNcA
+2026-11-17T03:15:40.019284+00:00 web-01 sshd[2310]: Accepted password for alice from 2001:db8::7 port 61022 ssh2
+2026-11-17T03:16:02.550173+00:00 web-01 systemd[1]: Started session-42.scope - Session 42 of User alice.
+this line is corrupted and matches nothing

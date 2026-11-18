@@ -13,7 +13,7 @@ such as SSH brute-force and password spraying, and raises alerts mapped to
 - [x] Repository foundation
 - [x] Python project skeleton and first test
 - [x] Continuous integration on every push
-- [ ] SSH authentication log parser
+- [x] SSH authentication log parser
 - [ ] Brute-force detection
 - [ ] Rule engine with MITRE ATT&CK mapping
 - [ ] Command-line scanner
