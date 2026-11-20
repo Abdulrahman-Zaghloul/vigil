@@ -15,6 +15,11 @@ class Severity(StrEnum):
     HIGH = "high"
     CRITICAL = "critical"
 
+    @property
+    def rank(self) -> int:
+        """Position on the scale (LOW is 0, CRITICAL is 3), so severities can be compared."""
+        return list(Severity).index(self)
+
 
 @dataclass(frozen=True, slots=True)
 class Alert:

@@ -12,6 +12,9 @@ license = "MIT"
 authors = [{ name = "Abdulrahman Zaghloul" }]
 dependencies = []
 
+[project.scripts]
+vigil = "vigil.cli:main"
+
 [project.optional-dependencies]
 dev = [
     "pytest>=8.2",
