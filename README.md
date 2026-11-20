@@ -8,6 +8,16 @@ such as SSH brute-force and password spraying, and raises alerts mapped to
 
 > **Status:** early development, built in public one part at a time.
 
+## Detections
+
+| Rule | Fires when | ATT&CK | Severity |
+| --- | --- | --- | --- |
+| `ssh-brute-force` | One address fails 5+ logins within 1 minute | [T1110.001](https://attack.mitre.org/techniques/T1110/001/) | Medium |
+| `ssh-password-spray` | One address fails against 10+ different accounts within 10 minutes | [T1110.003](https://attack.mitre.org/techniques/T1110/003/) | Medium |
+| `ssh-success-after-failures` | An address logs in after 5+ failures within 15 minutes | [T1110](https://attack.mitre.org/techniques/T1110/) | High, Critical for `root` |
+
+Every threshold is configurable, and each alert carries the exact log lines that triggered it.
+
 ## Roadmap
 
 - [x] Repository foundation
@@ -15,7 +25,7 @@ such as SSH brute-force and password spraying, and raises alerts mapped to
 - [x] Continuous integration on every push
 - [x] SSH authentication log parser
 - [x] Brute-force detection
-- [ ] Rule engine with MITRE ATT&CK mapping
+- [x] Rule engine with MITRE ATT&CK mapping
 - [ ] Command-line scanner
 - [ ] PostgreSQL storage
 - [ ] Ingestion and alerts API
