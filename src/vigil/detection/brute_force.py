@@ -10,11 +10,11 @@ month's logs gives exactly the answer that watching them live would have given.
 
 from __future__ import annotations
 
-from collections import deque
 from collections.abc import Iterable
-from datetime import datetime, timedelta
+from datetime import timedelta
 
 from vigil.alerts import Alert, Severity
+from vigil.detection.windows import Cooldown, SlidingWindow
 from vigil.events import AuthEvent, AuthOutcome, IPAddress
 
 RULE_ID = "ssh-brute-force"
@@ -23,7 +23,6 @@ TECHNIQUE = "T1110.001"
 DEFAULT_THRESHOLD = 5
 DEFAULT_WINDOW = timedelta(minutes=1)
 DEFAULT_COOLDOWN = timedelta(minutes=15)
-_SWEEP_EVERY = 1_000  # events between clean-ups of addresses that went quiet
 
 
 class BruteForceDetector:
@@ -32,6 +31,9 @@ class BruteForceDetector:
     After alerting, the same address stays quiet for `cooldown`, so one long attack
     produces one alert instead of burying analysts under hundreds.
     """
+
+    rule_id = RULE_ID
+    technique = TECHNIQUE
 
     def __init__(
         self,
@@ -42,42 +44,26 @@ class BruteForceDetector:
     ) -> None:
         if threshold < 2:
             raise ValueError("threshold must be at least 2")
-        if window <= timedelta(0):
-            raise ValueError("window must be longer than zero")
-        if cooldown < timedelta(0):
-            raise ValueError("cooldown must not be negative")
         self._threshold = threshold
         self._window = window
-        self._cooldown = cooldown
-        self._recent_failures: dict[IPAddress, deque[AuthEvent]] = {}
-        self._quiet_until: dict[IPAddress, datetime] = {}
-        self._processed = 0
+        self._failures: SlidingWindow[IPAddress] = SlidingWindow(window)
+        self._cooldown: Cooldown[IPAddress] = Cooldown(cooldown)
 
     @property
     def tracked_sources(self) -> int:
         """How many addresses the detector currently remembers."""
-        return len(self._recent_failures)
+        return len(self._failures)
 
     def process(self, event: AuthEvent) -> Alert | None:
         """Feed one event; returns an Alert the moment an attack is recognized."""
-        self._processed += 1
-        if self._processed % _SWEEP_EVERY == 0:
-            self._forget_quiet_sources(now=event.timestamp)
         if event.outcome is not AuthOutcome.FAILURE:
             return None
-
-        # Sliding window: keep only this address's failures from the last `window`.
-        recent = self._recent_failures.setdefault(event.source_ip, deque())
-        recent.append(event)
-        while event.timestamp - recent[0].timestamp > self._window:
-            recent.popleft()
+        recent = self._failures.add(event.source_ip, event)
         if len(recent) < self._threshold:
             return None
-
-        quiet_until = self._quiet_until.get(event.source_ip)
-        if quiet_until is not None and event.timestamp < quiet_until:
+        if self._cooldown.active(event.source_ip, now=event.timestamp):
             return None  # the same attack, already reported
-        self._quiet_until[event.source_ip] = event.timestamp + self._cooldown
+        self._cooldown.start(event.source_ip, now=event.timestamp)
 
         seconds = int(self._window.total_seconds())
         return Alert(
@@ -91,21 +77,8 @@ class BruteForceDetector:
             source_ip=event.source_ip,
             first_seen=recent[0].timestamp,
             last_seen=event.timestamp,
-            evidence=tuple(recent),
+            evidence=recent,
         )
-
-    def _forget_quiet_sources(self, *, now: datetime) -> None:
-        """Drop addresses with no recent failures, so memory stays bounded.
-
-        Without this, an attacker rotating through millions of addresses could grow
-        the detector until the machine runs out of memory: a denial of service.
-        """
-        self._recent_failures = {
-            ip: failures
-            for ip, failures in self._recent_failures.items()
-            if now - failures[-1].timestamp <= self._window
-        }
-        self._quiet_until = {ip: until for ip, until in self._quiet_until.items() if until > now}
 
 
 def detect_brute_force(
