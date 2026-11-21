@@ -27,7 +27,7 @@ Every threshold is configurable, and each alert carries the exact log lines that
 - [x] Brute-force detection
 - [x] Rule engine with MITRE ATT&CK mapping
 - [x] Command-line scanner
-- [ ] PostgreSQL storage
+- [x] PostgreSQL storage
 - [ ] Ingestion and alerts API
 - [ ] API hardening: keys, signatures, rate limits
 - [ ] Continuous detection worker
@@ -43,7 +43,13 @@ vigil scan /var/log/auth.log                    # human-readable report
 vigil scan auth.log.2.gz auth.log.1 auth.log    # rotated logs (oldest first), .gz included
 vigil scan auth.log --format json               # one JSON object per alert, for other tools
 vigil scan auth.log --min-severity high --evidence
+
+# With the database extra (pip install "vigil[db]") and VIGIL_DATABASE_URL set:
+vigil db upgrade                                # create or update the tables
+vigil scan auth.log --save                      # also store every event and alert
 ```
+
+Saving is idempotent: scanning the same log twice never stores anything twice.
 
 Exit codes: `0` no alerts, `1` alerts found, `2` error, so Vigil drops straight into
 scripts and cron jobs. Running it on the bundled attack scenario:

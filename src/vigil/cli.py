@@ -1,4 +1,4 @@
-"""Command-line interface: ``vigil scan /var/log/auth.log``.
+"""Command-line interface: ``vigil scan /var/log/auth.log`` and ``vigil db upgrade``.
 
 Exit codes follow the Unix convention used by tools like grep, so scripts and cron jobs
 can react without parsing any output: 0 = no alerts, 1 = alerts found, 2 = error.
@@ -9,8 +9,9 @@ from __future__ import annotations
 import argparse
 import gzip
 import json
+import os
 import sys
-from collections.abc import Iterable, Iterator, Sequence
+from collections.abc import Callable, Iterable, Iterator, Sequence
 from typing import TextIO
 
 from vigil import __version__
@@ -20,10 +21,13 @@ from vigil.detection.engine import DetectionEngine, default_rules
 from vigil.events import AuthEvent
 from vigil.parsers.ssh import parse_lines
 
-EXIT_NO_ALERTS = 0
+EXIT_OK = 0
+EXIT_NO_ALERTS = EXIT_OK
 EXIT_ALERTS = 1
 EXIT_ERROR = 2
 _INDENT = " " * 10
+DATABASE_URL_VARIABLE = "VIGIL_DATABASE_URL"
+_NO_DB_EXTRA = "vigil: database support is not installed; run: pip install 'vigil[db]'"
 
 
 class LogReadError(Exception):
@@ -64,11 +68,40 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="print the log lines behind each alert (text format)",
     )
+    scan.add_argument(
+        "--save",
+        action="store_true",
+        help="also store every event and alert in PostgreSQL (needs the db extra)",
+    )
+    _add_database_url_option(scan)
+    scan.set_defaults(handler=_scan)
+
+    db = commands.add_parser("db", help="manage the PostgreSQL database")
+    db_commands = db.add_subparsers(dest="db_command", required=True, metavar="ACTION")
+    upgrade = db_commands.add_parser("upgrade", help="create or update the database tables")
+    _add_database_url_option(upgrade)
+    upgrade.set_defaults(handler=_db_upgrade)
     return parser
+
+
+def _add_database_url_option(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument(
+        "--database-url",
+        metavar="URL",
+        help=(
+            f"PostgreSQL URL; defaults to ${DATABASE_URL_VARIABLE}. Prefer the variable: "
+            "command-line arguments show up in process lists and shell history"
+        ),
+    )
 
 
 def main(argv: Sequence[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
+    handler: Callable[[argparse.Namespace], int] = args.handler
+    return handler(args)
+
+
+def _scan(args: argparse.Namespace) -> int:
     line_count = 0
 
     def counted(lines: Iterable[str]) -> Iterator[str]:
@@ -83,18 +116,84 @@ def main(argv: Sequence[str] | None = None) -> int:
         print(f"vigil: {error}", file=sys.stderr)
         return EXIT_ERROR
 
+    all_alerts = DetectionEngine(default_rules()).run(events)
     minimum = Severity(args.min_severity)
-    alerts = [
-        alert
-        for alert in DetectionEngine(default_rules()).run(events)
-        if alert.severity.rank >= minimum.rank
-    ]
+    alerts = [alert for alert in all_alerts if alert.severity.rank >= minimum.rank]
     if args.format == "json":
         for alert in alerts:
             print(json.dumps(alert_to_dict(alert)))
     else:
         _print_report(alerts, lines=line_count, events=events, evidence=args.evidence)
+
+    # --min-severity only filters what is shown; the database keeps every alert.
+    if args.save and not _save(args, events, all_alerts):
+        return EXIT_ERROR
     return EXIT_ALERTS if alerts else EXIT_NO_ALERTS
+
+
+def _database_url(args: argparse.Namespace) -> str | None:
+    url = args.database_url or os.environ.get(DATABASE_URL_VARIABLE)
+    if not url:
+        print(
+            f"vigil: no database configured; set {DATABASE_URL_VARIABLE} or pass --database-url",
+            file=sys.stderr,
+        )
+    return url
+
+
+def _database_error(error: Exception) -> str:
+    """The driver's own first line, which names the problem but never the password."""
+    original = getattr(error, "orig", None) or error
+    first_line = str(original).strip().splitlines()[0] if str(original).strip() else ""
+    return f"vigil: database error: {type(original).__name__}: {first_line}"
+
+
+def _save(args: argparse.Namespace, events: list[AuthEvent], alerts: list[Alert]) -> bool:
+    url = _database_url(args)
+    if url is None:
+        return False
+    try:
+        from sqlalchemy.exc import SQLAlchemyError
+
+        from vigil.storage.store import Store
+    except ImportError:
+        print(_NO_DB_EXTRA, file=sys.stderr)
+        return False
+    try:
+        store = Store.connect(url)
+        try:
+            result = store.save(events, alerts)
+        finally:
+            store.close()
+    except SQLAlchemyError as error:
+        print(_database_error(error), file=sys.stderr)
+        return False
+    # Status messages go to stderr, so stdout stays pure data (e.g. JSON for other tools).
+    print(
+        f"vigil: saved {result.events_added} new events and {result.alerts_added} new alerts",
+        file=sys.stderr,
+    )
+    return True
+
+
+def _db_upgrade(args: argparse.Namespace) -> int:
+    url = _database_url(args)
+    if url is None:
+        return EXIT_ERROR
+    try:
+        from sqlalchemy.exc import SQLAlchemyError
+
+        from vigil.storage.migrate import upgrade
+    except ImportError:
+        print(_NO_DB_EXTRA, file=sys.stderr)
+        return EXIT_ERROR
+    try:
+        upgrade(url)
+    except SQLAlchemyError as error:
+        print(_database_error(error), file=sys.stderr)
+        return EXIT_ERROR
+    print("vigil: database is up to date")
+    return EXIT_OK
 
 
 def _read_lines(paths: Iterable[str], stdin: TextIO) -> Iterator[str]:

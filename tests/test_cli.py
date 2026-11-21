@@ -1,14 +1,20 @@
+from __future__ import annotations
+
 import gzip
 import io
 import json
 import subprocess
 import sys
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 import pytest
 
 from vigil import __version__
 from vigil.cli import main
+
+if TYPE_CHECKING:
+    from vigil.storage.store import Store
 
 DATA = Path(__file__).parent / "data"
 SCENARIO = str(DATA / "attack_scenario.log")
@@ -145,3 +151,64 @@ def test_runs_as_a_python_module() -> None:
     )
     assert result.returncode == 0
     assert __version__ in result.stdout
+
+
+# --- Saving to the database (needs VIGIL_TEST_DATABASE_URL; skipped otherwise) ----------
+
+
+def test_save_stores_a_scan_once_and_keeps_json_output_clean(
+    store: Store, database_url: str, capsys: pytest.CaptureFixture[str]
+) -> None:
+    command = ["scan", SCENARIO, "--save", "--database-url", database_url, "--format", "json"]
+
+    assert main(command) == 1
+    first = capsys.readouterr()
+    assert len(json_records(first.out)) == 3  # standard output carries only the data...
+    assert "saved 19 new events and 3 new alerts" in first.err  # ...status goes to stderr
+
+    assert main(command) == 1
+    assert "saved 0 new events and 0 new alerts" in capsys.readouterr().err
+    assert store.counts() == (19, 3)
+
+
+def test_min_severity_filters_the_report_but_every_alert_is_saved(
+    store: Store, database_url: str
+) -> None:
+    main(["scan", SCENARIO, "--save", "--database-url", database_url, "--min-severity", "critical"])
+    assert store.counts() == (19, 3)
+
+
+def test_the_database_url_can_come_from_the_environment(
+    store: Store, database_url: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("VIGIL_DATABASE_URL", database_url)
+    assert main(["scan", SCENARIO, "--save"]) == 1
+    assert store.counts() == (19, 3)
+
+
+def test_saving_without_a_database_is_a_clear_error(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    monkeypatch.delenv("VIGIL_DATABASE_URL", raising=False)
+    assert main(["scan", SCENARIO, "--save"]) == 2
+    assert "VIGIL_DATABASE_URL" in capsys.readouterr().err
+
+
+def test_an_unreachable_database_is_reported_without_leaking_the_password(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    pytest.importorskip("sqlalchemy")
+    url = "postgresql+psycopg://vigil:s3cret-pass@127.0.0.1:1/vigil"
+
+    assert main(["scan", SCENARIO, "--save", "--database-url", url]) == 2
+    err = capsys.readouterr().err
+    assert "database" in err
+    assert "s3cret-pass" not in err
+    assert "Traceback" not in err
+
+
+def test_db_upgrade_builds_the_tables(
+    database_url: str, capsys: pytest.CaptureFixture[str]
+) -> None:
+    assert main(["db", "upgrade", "--database-url", database_url]) == 0
+    assert "up to date" in capsys.readouterr().out
