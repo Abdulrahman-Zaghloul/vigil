@@ -67,14 +67,20 @@ CRITICAL  2026-11-17 03:10:00 -> 03:10:40 UTC  ssh-success-after-failures
 
 ## Development
 
-Requires Python 3.12 or newer.
+Requires Python 3.12 or newer, and Docker for the database features.
 
 ```bash
 python -m venv .venv
 # Windows: .venv\Scripts\activate    macOS/Linux: source .venv/bin/activate
-pip install -e ".[dev]"
+pip install -e ".[dev,db]"
 
-pytest          # run the tests
+docker compose up -d db    # PostgreSQL on localhost:5432 (local development credentials)
+
+# Point the tests at the test database:
+#   Windows PowerShell: $env:VIGIL_TEST_DATABASE_URL = "postgresql+psycopg://vigil:vigil@localhost:5432/vigil_test"
+#   macOS/Linux:        export VIGIL_TEST_DATABASE_URL=postgresql+psycopg://vigil:vigil@localhost:5432/vigil_test
+
+pytest          # run the tests (database tests are skipped if the variable is unset)
 ruff check .    # lint: style and common bugs
 mypy            # static type checking
 ```
