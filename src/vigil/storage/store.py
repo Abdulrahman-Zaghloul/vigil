@@ -77,7 +77,11 @@ class Store:
     @classmethod
     def connect(cls, url: str) -> Store:
         # pool_pre_ping quietly replaces connections the database has dropped.
-        return cls(create_engine(url, pool_pre_ping=True))
+        # timezone=UTC: PostgreSQL stores instants correctly but *displays* them in each
+        # connection's zone, which depends on server settings. Vigil always speaks UTC.
+        return cls(
+            create_engine(url, pool_pre_ping=True, connect_args={"options": "-c timezone=UTC"})
+        )
 
     def close(self) -> None:
         self.engine.dispose()

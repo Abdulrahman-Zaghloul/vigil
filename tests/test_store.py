@@ -1,4 +1,5 @@
 import dataclasses
+from datetime import timedelta
 from pathlib import Path
 
 import pytest
@@ -103,3 +104,19 @@ def test_null_characters_from_hostile_logs_cannot_break_saving(store: Store) -> 
 
 def test_the_migrations_match_the_schema_in_code(database_url: str) -> None:
     check(database_url)  # raises if a table definition changed without a migration
+
+
+def test_timestamps_come_back_in_utc_whatever_the_servers_time_zone(store: Store) -> None:
+    store.save(*scan("attack_scenario.log"))
+    with store.engine.begin() as connection:  # a server configured for New York, say
+        connection.execute(text("ALTER DATABASE vigil_test SET timezone = 'America/New_York'"))
+    try:
+        reconnected = Store.connect(str(store.engine.url.render_as_string(hide_password=False)))
+        [alert] = reconnected.recent_alerts(min_severity=Severity.CRITICAL)
+        reconnected.close()
+    finally:
+        with store.engine.begin() as connection:
+            connection.execute(text("ALTER DATABASE vigil_test RESET timezone"))
+
+    assert alert.first_seen.utcoffset() == timedelta(0)
+    assert alert.first_seen.isoformat() == "2026-11-17T03:10:00+00:00"
