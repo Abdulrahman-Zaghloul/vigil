@@ -7,8 +7,9 @@ from collections.abc import Iterable
 from dataclasses import dataclass
 from datetime import datetime
 from itertools import batched
+from typing import Any
 
-from sqlalchemy import Connection, Engine, create_engine, func, select
+from sqlalchemy import Connection, Engine, Row, create_engine, func, select, text
 from sqlalchemy.dialects.postgresql import insert
 
 from vigil.alerts import Alert, Severity
@@ -164,21 +165,17 @@ class Store:
             .limit(limit)
         )
         with self.engine.connect() as connection:
-            return [
-                StoredAlert(
-                    id=row.id,
-                    rule_id=row.rule_id,
-                    severity=Severity(row.severity),
-                    technique=row.technique,
-                    title=row.title,
-                    source_ip=str(row.source_ip),
-                    first_seen=row.first_seen,
-                    last_seen=row.last_seen,
-                    event_count=row.event_count,
-                    created_at=row.created_at,
-                )
-                for row in connection.execute(query)
-            ]
+            return [_stored_alert(row) for row in connection.execute(query)]
+
+    def get_alert(self, alert_id: int) -> StoredAlert | None:
+        with self.engine.connect() as connection:
+            row = connection.execute(select(alerts).where(alerts.c.id == alert_id)).first()
+        return None if row is None else _stored_alert(row)
+
+    def ping(self) -> None:
+        """Raise if the database cannot answer a trivial query."""
+        with self.engine.connect() as connection:
+            connection.execute(text("SELECT 1"))
 
     def evidence(self, alert_id: int) -> list[str]:
         """The original log lines behind an alert, oldest first."""
@@ -190,3 +187,18 @@ class Store:
         )
         with self.engine.connect() as connection:
             return list(connection.execute(query).scalars())
+
+
+def _stored_alert(row: Row[Any]) -> StoredAlert:
+    return StoredAlert(
+        id=row.id,
+        rule_id=row.rule_id,
+        severity=Severity(row.severity),
+        technique=row.technique,
+        title=row.title,
+        source_ip=str(row.source_ip),
+        first_seen=row.first_seen,
+        last_seen=row.last_seen,
+        event_count=row.event_count,
+        created_at=row.created_at,
+    )

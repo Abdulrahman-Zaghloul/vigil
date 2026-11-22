@@ -1,29 +1,17 @@
 import dataclasses
 from datetime import timedelta
-from pathlib import Path
 
 import pytest
 
 pytest.importorskip("sqlalchemy", reason="install the db extra: pip install -e '.[db]'")
 
-from factories import START, attempt
+from factories import attempt, scan
 from sqlalchemy import text
 from sqlalchemy.exc import IntegrityError
 
-from vigil.alerts import Alert, Severity
-from vigil.detection.engine import DetectionEngine, default_rules
-from vigil.events import AuthEvent
-from vigil.parsers.ssh import parse_lines
+from vigil.alerts import Severity
 from vigil.storage.migrate import check
 from vigil.storage.store import SaveResult, Store
-
-DATA = Path(__file__).parent / "data"
-
-
-def scan(log_name: str) -> tuple[list[AuthEvent], list[Alert]]:
-    lines = (DATA / log_name).read_text(encoding="utf-8").splitlines()
-    events = list(parse_lines(lines, now=START))
-    return events, DetectionEngine(default_rules()).run(events)
 
 
 def test_a_scan_is_saved_with_its_alerts(store: Store) -> None:

@@ -73,12 +73,12 @@ CRITICAL  2026-11-17 03:10:00 -> 03:10:40 UTC  ssh-success-after-failures
 
 ## Development
 
-Requires Python 3.12 or newer, and Docker for the database features.
+Requires Python 3.12 or newer, and Docker for the database and API features.
 
 ```bash
 python -m venv .venv
 # Windows: .venv\Scripts\activate    macOS/Linux: source .venv/bin/activate
-pip install -e ".[dev,db]"
+pip install -e ".[dev,api]"
 
 docker compose up -d db    # PostgreSQL on localhost:5432 (local development credentials)
 

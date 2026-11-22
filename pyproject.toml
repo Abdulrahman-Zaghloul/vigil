@@ -21,7 +21,13 @@ db = [
     "psycopg[binary]>=3.2",
     "alembic>=1.13",
 ]
+api = [
+    "vigil[db]",  # the API reads and writes the database
+    "fastapi>=0.115",
+    "uvicorn>=0.30",
+]
 dev = [
+    "httpx2>=2.0",  # used by FastAPI's TestClient
     "pytest>=8.2",
     "ruff>=0.5",
     "mypy>=1.10",
@@ -44,6 +50,9 @@ target-version = "py312"
 [tool.ruff.lint]
 select = ["E", "F", "W", "I", "B", "UP", "S", "SIM", "RUF"]
 ignore = ["S101"]  # pytest uses plain assert statements
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**" = ["S105", "S106"]  # tests use fake secrets on purpose
 
 [tool.mypy]
 strict = true
