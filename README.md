@@ -28,7 +28,7 @@ Every threshold is configurable, and each alert carries the exact log lines that
 - [x] Rule engine with MITRE ATT&CK mapping
 - [x] Command-line scanner
 - [x] PostgreSQL storage
-- [ ] Ingestion and alerts API
+- [x] Ingestion and alerts API
 - [ ] API hardening: keys, signatures, rate limits
 - [ ] Continuous detection worker
 - [ ] Alert notifications
@@ -70,6 +70,27 @@ CRITICAL  2026-11-17 03:10:00 -> 03:10:40 UTC  ssh-success-after-failures
           Possible compromise: 'root' logged in from 198.51.100.23 after 6 failed attempts
           ATT&CK T1110 Brute Force - 7 events
 ```
+
+## Web API
+
+```bash
+pip install "vigil[api]"
+# Windows PowerShell: $env:VIGIL_API_TOKEN = python -c "import secrets; print(secrets.token_urlsafe(32))"
+export VIGIL_API_TOKEN=$(python -c "import secrets; print(secrets.token_urlsafe(32))")
+vigil serve                    # http://127.0.0.1:8000 - interactive documentation at /docs
+```
+
+| Endpoint | Purpose |
+| --- | --- |
+| `GET /health`, `GET /health/ready` | Is it running? Can it reach the database? (no token needed) |
+| `POST /v1/events` | Send up to 1,000 raw log lines; SSH login attempts are parsed and stored |
+| `GET /v1/alerts?min_severity=high&limit=50` | Alerts, newest first |
+| `GET /v1/alerts/{id}` | One alert with the exact log lines behind it |
+
+Data endpoints require `Authorization: Bearer <VIGIL_API_TOKEN>`, and the server refuses
+to start with a token shorter than 32 characters. It listens on 127.0.0.1 unless told
+otherwise. Per-client keys, request signing and rate limits are next on the roadmap; until
+then, keep the API on a trusted network.
 
 ## Development
 

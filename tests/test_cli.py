@@ -212,3 +212,34 @@ def test_db_upgrade_builds_the_tables(
 ) -> None:
     assert main(["db", "upgrade", "--database-url", database_url]) == 0
     assert "up to date" in capsys.readouterr().out
+
+
+# --- Running the web API ------------------------------------------------------------------
+
+UNUSED_DATABASE = "postgresql+psycopg://vigil:vigil@127.0.0.1:1/vigil"  # never contacted
+
+
+@pytest.mark.parametrize("token", [None, "too-short"], ids=["missing", "too-short"])
+def test_serve_refuses_to_start_without_a_strong_token(
+    token: str | None, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    pytest.importorskip("fastapi")
+    if token is None:
+        monkeypatch.delenv("VIGIL_API_TOKEN", raising=False)
+    else:
+        monkeypatch.setenv("VIGIL_API_TOKEN", token)
+
+    assert main(["serve", "--database-url", UNUSED_DATABASE]) == 2
+    err = capsys.readouterr().err
+    assert "VIGIL_API_TOKEN" in err
+    assert "secrets.token_urlsafe" in err  # tells the user how to make a good one
+
+
+def test_serve_listens_only_on_this_machine_by_default(monkeypatch: pytest.MonkeyPatch) -> None:
+    uvicorn = pytest.importorskip("uvicorn")
+    started: list[dict[str, object]] = []
+    monkeypatch.setattr(uvicorn, "run", lambda app, **options: started.append(options))
+    monkeypatch.setenv("VIGIL_API_TOKEN", "t" * 40)
+
+    assert main(["serve", "--database-url", UNUSED_DATABASE]) == 0
+    assert started == [{"host": "127.0.0.1", "port": 8000}]

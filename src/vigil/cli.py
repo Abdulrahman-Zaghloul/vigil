@@ -1,4 +1,4 @@
-"""Command-line interface: ``vigil scan /var/log/auth.log`` and ``vigil db upgrade``.
+"""Command-line interface: ``vigil scan``, ``vigil db upgrade`` and ``vigil serve``.
 
 Exit codes follow the Unix convention used by tools like grep, so scripts and cron jobs
 can react without parsing any output: 0 = no alerts, 1 = alerts found, 2 = error.
@@ -27,6 +27,7 @@ EXIT_ALERTS = 1
 EXIT_ERROR = 2
 _INDENT = " " * 10
 DATABASE_URL_VARIABLE = "VIGIL_DATABASE_URL"
+API_TOKEN_VARIABLE = "VIGIL_API_TOKEN"  # noqa: S105 - the variable's name, not a secret
 _NO_DB_EXTRA = "vigil: database support is not installed; run: pip install 'vigil[db]'"
 
 
@@ -81,6 +82,22 @@ def build_parser() -> argparse.ArgumentParser:
     upgrade = db_commands.add_parser("upgrade", help="create or update the database tables")
     _add_database_url_option(upgrade)
     upgrade.set_defaults(handler=_db_upgrade)
+
+    serve = commands.add_parser(
+        "serve",
+        help="run the web API",
+        description=f"Run the web API. The API token is read from ${API_TOKEN_VARIABLE} only, "
+        "never from the command line, so it cannot leak into process lists.",
+    )
+    serve.add_argument(
+        "--host",
+        default="127.0.0.1",
+        help="address to listen on (default: 127.0.0.1, this machine only; "
+        "0.0.0.0 accepts connections from the network)",
+    )
+    serve.add_argument("--port", type=int, default=8000, help="port to listen on (default: 8000)")
+    _add_database_url_option(serve)
+    serve.set_defaults(handler=_serve)
     return parser
 
 
@@ -276,3 +293,32 @@ def _time_range(alert: Alert) -> str:
     start, end = alert.first_seen, alert.last_seen
     end_format = "%H:%M:%S" if start.date() == end.date() else "%Y-%m-%d %H:%M:%S"
     return f"{start:%Y-%m-%d %H:%M:%S} -> {end:{end_format}} UTC"
+
+
+def _serve(args: argparse.Namespace) -> int:
+    url = _database_url(args)
+    if url is None:
+        return EXIT_ERROR
+    try:
+        import uvicorn
+
+        from vigil.api.app import MIN_TOKEN_LENGTH, create_app
+        from vigil.storage.store import Store
+    except ImportError:
+        print("vigil: the web API is not installed; run: pip install 'vigil[api]'", file=sys.stderr)
+        return EXIT_ERROR
+
+    token = os.environ.get(API_TOKEN_VARIABLE, "")
+    if len(token) < MIN_TOKEN_LENGTH:
+        print(
+            f"vigil: set {API_TOKEN_VARIABLE} to a random secret of at least "
+            f"{MIN_TOKEN_LENGTH} characters, for example:\n"
+            '  python -c "import secrets; print(secrets.token_urlsafe(32))"',
+            file=sys.stderr,
+        )
+        return EXIT_ERROR
+
+    uvicorn.run(
+        create_app(store=Store.connect(url), api_token=token), host=args.host, port=args.port
+    )
+    return EXIT_OK
