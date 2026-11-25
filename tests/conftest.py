@@ -39,6 +39,8 @@ def store(database_url: str) -> Iterator[Store]:
 
     store = Store.connect(database_url)
     with store.engine.begin() as connection:
-        connection.execute(text("TRUNCATE events, alerts, alert_evidence RESTART IDENTITY"))
+        connection.execute(
+            text("TRUNCATE events, alerts, alert_evidence, api_keys RESTART IDENTITY")
+        )
     yield store
     store.close()

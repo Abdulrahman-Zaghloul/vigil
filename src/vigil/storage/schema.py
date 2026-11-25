@@ -21,8 +21,9 @@ from sqlalchemy import (
     Table,
     Text,
     func,
+    text,
 )
-from sqlalchemy.dialects.postgresql import INET
+from sqlalchemy.dialects.postgresql import ARRAY, INET
 
 # Predictable constraint names keep migrations readable and reversible.
 metadata = MetaData(
@@ -82,4 +83,29 @@ alert_evidence = Table(
     Column("alert_id", BigInteger, ForeignKey("alerts.id", ondelete="CASCADE"), primary_key=True),
     Column("event_id", BigInteger, ForeignKey("events.id", ondelete="CASCADE"), primary_key=True),
     Index(None, "event_id"),
+)
+
+# Per-client API keys. Only a hash of each secret is stored, never the secret itself.
+api_keys = Table(
+    "api_keys",
+    metadata,
+    Column("id", BigInteger, Identity(always=True), primary_key=True),
+    Column("key_id", String(12), nullable=False, unique=True),  # public half of the key
+    Column("name", String(64), nullable=False),
+    Column("secret_hash", String(64), nullable=False),
+    Column("scopes", ARRAY(String(16)), nullable=False),
+    Column("created_at", DateTime(timezone=True), nullable=False, server_default=func.now()),
+    Column("last_used_at", DateTime(timezone=True)),
+    Column("revoked_at", DateTime(timezone=True)),
+    CheckConstraint(
+        "cardinality(scopes) > 0 AND scopes <@ ARRAY['ingest', 'read']::varchar[]",
+        name="scopes_valid",
+    ),
+    # Names are unique among *active* keys, so a revoked key's name can be reused.
+    Index(
+        "uq_api_keys_active_name",
+        "name",
+        unique=True,
+        postgresql_where=text("revoked_at IS NULL"),
+    ),
 )

@@ -3,21 +3,27 @@
 from __future__ import annotations
 
 import hashlib
+import hmac
+import re
 from collections.abc import Iterable
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timedelta
 from itertools import batched
 from typing import Any
 
-from sqlalchemy import Connection, Engine, Row, create_engine, func, select, text
+from sqlalchemy import Connection, Engine, Row, create_engine, func, or_, select, text, update
 from sqlalchemy.dialects.postgresql import insert
+from sqlalchemy.exc import IntegrityError
 
 from vigil.alerts import Alert, Severity
 from vigil.events import AuthEvent
-from vigil.storage.schema import alert_evidence, alerts, events
+from vigil.keys import Scope, generate_key, hash_secret, parse_key
+from vigil.storage.schema import alert_evidence, alerts, api_keys, events
 
 BATCH_SIZE = 1_000  # rows per INSERT: big enough to be fast, small enough to be safe
 MAX_PAGE_SIZE = 1_000
+KEY_NAME_PATTERN = re.compile(r"[a-z0-9][a-z0-9._-]{0,63}")
+_LAST_USED_RESOLUTION = timedelta(minutes=1)  # don't write to the database on every request
 
 
 @dataclass(frozen=True, slots=True)
@@ -38,6 +44,19 @@ class StoredAlert:
     last_seen: datetime
     event_count: int
     created_at: datetime
+
+
+@dataclass(frozen=True, slots=True)
+class ApiKeyInfo:
+    """Everything about a key except its secret, which Vigil never has."""
+
+    id: int
+    key_id: str
+    name: str
+    scopes: frozenset[Scope]
+    created_at: datetime
+    last_used_at: datetime | None
+    revoked_at: datetime | None
 
 
 def event_fingerprint(event: AuthEvent) -> str:
@@ -172,6 +191,75 @@ class Store:
             row = connection.execute(select(alerts).where(alerts.c.id == alert_id)).first()
         return None if row is None else _stored_alert(row)
 
+    # --- API keys ------------------------------------------------------------------------
+
+    def create_api_key(self, name: str, scopes: Iterable[Scope]) -> str:
+        """Create a key and return it. This is the only time the full key exists."""
+        if not KEY_NAME_PATTERN.fullmatch(name):
+            raise ValueError(
+                "key name must be 1-64 characters: lowercase letters, digits, '.', '_' or '-'"
+            )
+        chosen = sorted({Scope(scope) for scope in scopes})
+        if not chosen:
+            raise ValueError("a key needs at least one scope")
+        key = generate_key()
+        try:
+            with self.engine.begin() as connection:
+                connection.execute(
+                    insert(api_keys).values(
+                        key_id=key.key_id,
+                        name=name,
+                        secret_hash=hash_secret(key.secret),
+                        scopes=[scope.value for scope in chosen],
+                    )
+                )
+        except IntegrityError as error:
+            raise ValueError(f"an active key named {name!r} already exists") from error
+        return key.token
+
+    def authenticate(self, token: str) -> ApiKeyInfo | None:
+        """The key behind `token`, or None if it is malformed, unknown, wrong or revoked."""
+        parsed = parse_key(token)
+        if parsed is None:
+            return None
+        key_id, secret = parsed
+        with self.engine.begin() as connection:
+            row = connection.execute(
+                select(api_keys).where(api_keys.c.key_id == key_id, api_keys.c.revoked_at.is_(None))
+            ).first()
+            if row is None or not hmac.compare_digest(row.secret_hash, hash_secret(secret)):
+                return None
+            connection.execute(
+                update(api_keys)
+                .where(
+                    api_keys.c.id == row.id,
+                    or_(
+                        api_keys.c.last_used_at.is_(None),
+                        api_keys.c.last_used_at < func.now() - _LAST_USED_RESOLUTION,
+                    ),
+                )
+                .values(last_used_at=func.now())
+            )
+        return _api_key_info(row)
+
+    def api_keys(self) -> list[ApiKeyInfo]:
+        with self.engine.connect() as connection:
+            rows = connection.execute(
+                select(api_keys).order_by(api_keys.c.created_at, api_keys.c.id)
+            )
+            return [_api_key_info(row) for row in rows]
+
+    def revoke_api_key(self, name: str) -> bool:
+        """Revoke the active key with this name. False if there is none."""
+        with self.engine.begin() as connection:
+            revoked = connection.execute(
+                update(api_keys)
+                .where(api_keys.c.name == name, api_keys.c.revoked_at.is_(None))
+                .values(revoked_at=func.now())
+                .returning(api_keys.c.id)
+            ).first()
+        return revoked is not None
+
     def ping(self) -> None:
         """Raise if the database cannot answer a trivial query."""
         with self.engine.connect() as connection:
@@ -201,4 +289,16 @@ def _stored_alert(row: Row[Any]) -> StoredAlert:
         last_seen=row.last_seen,
         event_count=row.event_count,
         created_at=row.created_at,
+    )
+
+
+def _api_key_info(row: Row[Any]) -> ApiKeyInfo:
+    return ApiKeyInfo(
+        id=row.id,
+        key_id=row.key_id,
+        name=row.name,
+        scopes=frozenset(Scope(scope) for scope in row.scopes),
+        created_at=row.created_at,
+        last_used_at=row.last_used_at,
+        revoked_at=row.revoked_at,
     )

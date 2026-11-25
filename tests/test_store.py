@@ -10,6 +10,7 @@ from sqlalchemy import text
 from sqlalchemy.exc import IntegrityError
 
 from vigil.alerts import Severity
+from vigil.keys import Scope
 from vigil.storage.migrate import check
 from vigil.storage.store import SaveResult, Store
 
@@ -108,3 +109,99 @@ def test_timestamps_come_back_in_utc_whatever_the_servers_time_zone(store: Store
 
     assert alert.first_seen.utcoffset() == timedelta(0)
     assert alert.first_seen.isoformat() == "2026-11-17T03:10:00+00:00"
+
+
+# --- API keys -----------------------------------------------------------------------------
+
+
+def test_a_new_key_authenticates_with_exactly_its_scopes(store: Store) -> None:
+    token = store.create_api_key("web-01-shipper", {Scope.INGEST})
+
+    key = store.authenticate(token)
+
+    assert key is not None
+    assert key.name == "web-01-shipper"
+    assert key.scopes == frozenset({Scope.INGEST})
+
+
+def test_the_database_never_holds_the_secret(store: Store) -> None:
+    token = store.create_api_key("dashboard", {Scope.READ})
+    secret = token.split("_", 2)[2]  # vigil_<key id>_<secret>; the secret may contain "_"
+
+    with store.engine.connect() as connection:
+        row = connection.execute(text("SELECT * FROM api_keys")).one()
+
+    assert secret not in " ".join(str(value) for value in row)
+
+
+@pytest.mark.parametrize(
+    "token",
+    ["vigil_0123456789ab_" + "x" * 43, "not-a-key", ""],
+    ids=["unknown-key", "malformed", "empty"],
+)
+def test_unknown_or_malformed_keys_do_not_authenticate(store: Store, token: str) -> None:
+    store.create_api_key("dashboard", {Scope.READ})
+    assert store.authenticate(token) is None
+
+
+def test_the_right_key_id_with_a_wrong_secret_does_not_authenticate(store: Store) -> None:
+    token = store.create_api_key("dashboard", {Scope.READ})
+    forged = token[:-1] + ("A" if token[-1] != "A" else "B")
+    assert store.authenticate(forged) is None
+
+
+def test_a_revoked_key_stops_working_immediately(store: Store) -> None:
+    token = store.create_api_key("old-laptop", {Scope.READ})
+
+    assert store.revoke_api_key("old-laptop") is True
+    assert store.authenticate(token) is None
+    assert store.revoke_api_key("old-laptop") is False  # already revoked
+
+
+def test_using_a_key_records_when_it_was_last_used(store: Store) -> None:
+    token = store.create_api_key("dashboard", {Scope.READ})
+    [before] = store.api_keys()
+    store.authenticate(token)
+    [after] = store.api_keys()
+
+    assert before.last_used_at is None
+    assert after.last_used_at is not None
+
+
+def test_listing_keys_shows_names_and_scopes(store: Store) -> None:
+    store.create_api_key("shipper", {Scope.INGEST})
+    store.create_api_key("analyst", {Scope.READ, Scope.INGEST})
+    store.revoke_api_key("shipper")
+
+    keys = {key.name: key for key in store.api_keys()}
+
+    assert keys["analyst"].scopes == frozenset({Scope.READ, Scope.INGEST})
+    assert keys["analyst"].revoked_at is None
+    assert keys["shipper"].revoked_at is not None
+
+
+@pytest.mark.parametrize(
+    ("name", "scopes", "message"),
+    [
+        ("dashboard", {Scope.READ}, "already exists"),
+        ("Has Spaces", {Scope.READ}, "name"),
+        ("x" * 65, {Scope.READ}, "name"),
+        ("no-scopes", set(), "scope"),
+    ],
+    ids=["duplicate", "bad-characters", "too-long", "no-scopes"],
+)
+def test_bad_key_requests_are_refused(
+    store: Store, name: str, scopes: set[Scope], message: str
+) -> None:
+    store.create_api_key("dashboard", {Scope.READ})
+    with pytest.raises(ValueError, match=message):
+        store.create_api_key(name, scopes)
+
+
+def test_a_revoked_keys_name_can_be_reused(store: Store) -> None:
+    store.create_api_key("web-01-shipper", {Scope.INGEST})
+    store.revoke_api_key("web-01-shipper")
+
+    replacement = store.create_api_key("web-01-shipper", {Scope.INGEST})
+
+    assert store.authenticate(replacement) is not None
