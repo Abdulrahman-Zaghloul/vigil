@@ -1,4 +1,4 @@
-"""Command-line interface: ``vigil scan``, ``vigil db upgrade`` and ``vigil serve``.
+"""Command-line interface: ``vigil scan``, ``vigil db``, ``vigil keys`` and ``vigil serve``.
 
 Exit codes follow the Unix convention used by tools like grep, so scripts and cron jobs
 can react without parsing any output: 0 = no alerts, 1 = alerts found, 2 = error.
@@ -12,14 +12,19 @@ import json
 import os
 import sys
 from collections.abc import Callable, Iterable, Iterator, Sequence
-from typing import TextIO
+from datetime import datetime
+from typing import TYPE_CHECKING, TextIO
 
 from vigil import __version__
 from vigil.alerts import Alert, Severity
 from vigil.attack import TECHNIQUES
 from vigil.detection.engine import DetectionEngine, default_rules
 from vigil.events import AuthEvent
+from vigil.keys import Scope
 from vigil.parsers.ssh import parse_lines
+
+if TYPE_CHECKING:  # the db extra may not be installed
+    from vigil.storage.store import Store
 
 EXIT_OK = 0
 EXIT_NO_ALERTS = EXIT_OK
@@ -27,7 +32,6 @@ EXIT_ALERTS = 1
 EXIT_ERROR = 2
 _INDENT = " " * 10
 DATABASE_URL_VARIABLE = "VIGIL_DATABASE_URL"
-API_TOKEN_VARIABLE = "VIGIL_API_TOKEN"  # noqa: S105 - the variable's name, not a secret
 _NO_DB_EXTRA = "vigil: database support is not installed; run: pip install 'vigil[db]'"
 
 
@@ -86,8 +90,7 @@ def build_parser() -> argparse.ArgumentParser:
     serve = commands.add_parser(
         "serve",
         help="run the web API",
-        description=f"Run the web API. The API token is read from ${API_TOKEN_VARIABLE} only, "
-        "never from the command line, so it cannot leak into process lists.",
+        description="Run the web API. Clients authenticate with API keys: see `vigil keys`.",
     )
     serve.add_argument(
         "--host",
@@ -98,6 +101,29 @@ def build_parser() -> argparse.ArgumentParser:
     serve.add_argument("--port", type=int, default=8000, help="port to listen on (default: 8000)")
     _add_database_url_option(serve)
     serve.set_defaults(handler=_serve)
+
+    keys = commands.add_parser("keys", help="manage API keys")
+    key_commands = keys.add_subparsers(dest="keys_command", required=True, metavar="ACTION")
+    create = key_commands.add_parser("create", help="create a key and print it (shown only once)")
+    create.add_argument("name", help="a label for who will hold the key, e.g. web-01-shipper")
+    create.add_argument(
+        "--scope",
+        action="append",
+        required=True,
+        choices=[scope.value for scope in Scope],
+        help="what the key may do: ingest (send events) or read (read alerts); repeatable",
+    )
+    _add_database_url_option(create)
+    create.set_defaults(handler=_keys_create)
+
+    listing = key_commands.add_parser("list", help="show all keys (never their secrets)")
+    _add_database_url_option(listing)
+    listing.set_defaults(handler=_keys_list)
+
+    revoke = key_commands.add_parser("revoke", help="revoke the active key with this name")
+    revoke.add_argument("name")
+    _add_database_url_option(revoke)
+    revoke.set_defaults(handler=_keys_revoke)
     return parser
 
 
@@ -165,32 +191,93 @@ def _database_error(error: Exception) -> str:
     return f"vigil: database error: {type(original).__name__}: {first_line}"
 
 
-def _save(args: argparse.Namespace, events: list[AuthEvent], alerts: list[Alert]) -> bool:
+def _with_store(args: argparse.Namespace, action: Callable[[Store], int]) -> int:
+    """Connect, run `action`, close; turn missing extras and database errors into messages."""
     url = _database_url(args)
     if url is None:
-        return False
+        return EXIT_ERROR
     try:
         from sqlalchemy.exc import SQLAlchemyError
 
         from vigil.storage.store import Store
     except ImportError:
         print(_NO_DB_EXTRA, file=sys.stderr)
-        return False
+        return EXIT_ERROR
     try:
         store = Store.connect(url)
         try:
-            result = store.save(events, alerts)
+            return action(store)
         finally:
             store.close()
     except SQLAlchemyError as error:
         print(_database_error(error), file=sys.stderr)
-        return False
-    # Status messages go to stderr, so stdout stays pure data (e.g. JSON for other tools).
-    print(
-        f"vigil: saved {result.events_added} new events and {result.alerts_added} new alerts",
-        file=sys.stderr,
-    )
-    return True
+        return EXIT_ERROR
+
+
+def _save(args: argparse.Namespace, events: list[AuthEvent], alerts: list[Alert]) -> bool:
+    def action(store: Store) -> int:
+        result = store.save(events, alerts)
+        # Status messages go to stderr, so stdout stays pure data (e.g. JSON for other tools).
+        print(
+            f"vigil: saved {result.events_added} new events and {result.alerts_added} new alerts",
+            file=sys.stderr,
+        )
+        return EXIT_OK
+
+    return _with_store(args, action) == EXIT_OK
+
+
+def _keys_create(args: argparse.Namespace) -> int:
+    def action(store: Store) -> int:
+        try:
+            token = store.create_api_key(args.name, {Scope(scope) for scope in args.scope})
+        except ValueError as error:
+            print(f"vigil: {error}", file=sys.stderr)
+            return EXIT_ERROR
+        print(token)  # alone on stdout, so `vigil keys create ... > key.txt` captures just it
+        print(
+            "vigil: store this key somewhere safe now; Vigil keeps only a hash "
+            "and cannot show it again",
+            file=sys.stderr,
+        )
+        return EXIT_OK
+
+    return _with_store(args, action)
+
+
+def _keys_list(args: argparse.Namespace) -> int:
+    def when(moment: datetime | None) -> str:
+        return "never" if moment is None else f"{moment:%Y-%m-%d %H:%M}"
+
+    def action(store: Store) -> int:
+        keys = store.api_keys()
+        if not keys:
+            print("No API keys yet. Create one with: vigil keys create NAME --scope ingest")
+            return EXIT_OK
+        print(
+            f"{'NAME':<24}{'KEY ID':<14}{'SCOPES':<14}{'CREATED (UTC)':<18}{'LAST USED':<18}STATUS"
+        )
+        for key in keys:
+            scopes = ",".join(sorted(key.scopes))
+            status = "active" if key.revoked_at is None else "revoked"
+            print(
+                f"{key.name:<24}{key.key_id:<14}{scopes:<14}"
+                f"{when(key.created_at):<18}{when(key.last_used_at):<18}{status}"
+            )
+        return EXIT_OK
+
+    return _with_store(args, action)
+
+
+def _keys_revoke(args: argparse.Namespace) -> int:
+    def action(store: Store) -> int:
+        if not store.revoke_api_key(args.name):
+            print(f"vigil: no active key named {args.name!r}", file=sys.stderr)
+            return EXIT_ERROR
+        print(f"vigil: revoked {args.name!r}; it stops working immediately")
+        return EXIT_OK
+
+    return _with_store(args, action)
 
 
 def _db_upgrade(args: argparse.Namespace) -> int:
@@ -302,23 +389,10 @@ def _serve(args: argparse.Namespace) -> int:
     try:
         import uvicorn
 
-        from vigil.api.app import MIN_TOKEN_LENGTH, create_app
+        from vigil.api.app import create_app
         from vigil.storage.store import Store
     except ImportError:
         print("vigil: the web API is not installed; run: pip install 'vigil[api]'", file=sys.stderr)
         return EXIT_ERROR
-
-    token = os.environ.get(API_TOKEN_VARIABLE, "")
-    if len(token) < MIN_TOKEN_LENGTH:
-        print(
-            f"vigil: set {API_TOKEN_VARIABLE} to a random secret of at least "
-            f"{MIN_TOKEN_LENGTH} characters, for example:\n"
-            '  python -c "import secrets; print(secrets.token_urlsafe(32))"',
-            file=sys.stderr,
-        )
-        return EXIT_ERROR
-
-    uvicorn.run(
-        create_app(store=Store.connect(url), api_token=token), host=args.host, port=args.port
-    )
+    uvicorn.run(create_app(store=Store.connect(url)), host=args.host, port=args.port)
     return EXIT_OK

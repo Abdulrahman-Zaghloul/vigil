@@ -1,12 +1,12 @@
 """The Vigil web API: log shippers send events in, analysts read alerts out.
 
-Every data endpoint needs the API token. Part 10 replaces this single shared token with
-per-client keys, signed requests and rate limits.
+Every data endpoint needs an API key with the right scope: shippers hold `ingest` keys
+and can only send events; analysts and dashboards hold `read` keys and can only read.
+A stolen shipper key, which lives on a server, therefore cannot read any alerts.
 """
 
 from __future__ import annotations
 
-import hmac
 from collections.abc import Callable
 from typing import Annotated
 
@@ -25,47 +25,48 @@ from vigil.api.models import (
     EventBatch,
     IngestResult,
 )
+from vigil.keys import Scope
 from vigil.parsers.ssh import parse_lines
 from vigil.storage.store import MAX_PAGE_SIZE, Store
 
-__all__ = ["MAX_LINES", "MAX_LINE_LENGTH", "MIN_TOKEN_LENGTH", "create_app"]
+__all__ = ["MAX_LINES", "MAX_LINE_LENGTH", "create_app"]
 
-MIN_TOKEN_LENGTH = 32
 _bearer = HTTPBearer(auto_error=False)
 
 
-def _token_checker(expected: str) -> Callable[[HTTPAuthorizationCredentials | None], None]:
-    expected_bytes = expected.encode()
-
-    def require_token(
+def _scope_checker(
+    store: Store, scope: Scope
+) -> Callable[[HTTPAuthorizationCredentials | None], None]:
+    def require_scope(
         credentials: Annotated[HTTPAuthorizationCredentials | None, Depends(_bearer)],
     ) -> None:
-        # compare_digest takes the same time whether the first or the last character is
-        # wrong, so response timing cannot be used to guess the token one character at
-        # a time.
-        if credentials is None or not hmac.compare_digest(
-            credentials.credentials.encode(), expected_bytes
-        ):
+        key = None if credentials is None else store.authenticate(credentials.credentials)
+        if key is None:
+            # 401: "we don't know who you are" (missing, malformed, unknown or revoked key)
             raise HTTPException(
                 status_code=status.HTTP_401_UNAUTHORIZED,
-                detail="missing or invalid API token",
+                detail="missing or invalid API key",
                 headers={"WWW-Authenticate": "Bearer"},
             )
+        if scope not in key.scopes:
+            # 403: "we know who you are, and you may not do this"
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail=f"this key lacks the '{scope}' scope",
+            )
 
-    return require_token
+    return require_scope
 
 
-def create_app(*, store: Store, api_token: str) -> FastAPI:
-    """Build the API around a store. Refuses to start with a guessable token."""
-    if len(api_token) < MIN_TOKEN_LENGTH:
-        raise ValueError(f"the API token must be at least {MIN_TOKEN_LENGTH} characters long")
-
+def create_app(*, store: Store) -> FastAPI:
+    """Build the API around a store; API keys are checked against the same store."""
     app = FastAPI(
         title="Vigil",
         version=__version__,
         description="Threat detection for security logs: send events in, read alerts out.",
     )
-    authenticated = [Depends(_token_checker(api_token))]
+    can_ingest = [Depends(_scope_checker(store, Scope.INGEST))]
+    can_read = [Depends(_scope_checker(store, Scope.READ))]
 
     @app.get("/health", tags=["operations"], summary="Is the process running?")
     def health() -> dict[str, str]:
@@ -86,7 +87,7 @@ def create_app(*, store: Store, api_token: str) -> FastAPI:
 
     @app.post(
         "/v1/events",
-        dependencies=authenticated,
+        dependencies=can_ingest,
         tags=["events"],
         summary="Send raw log lines; SSH login attempts are parsed and stored",
     )
@@ -99,7 +100,7 @@ def create_app(*, store: Store, api_token: str) -> FastAPI:
 
     @app.get(
         "/v1/alerts",
-        dependencies=authenticated,
+        dependencies=can_read,
         tags=["alerts"],
         summary="Alerts, newest first",
     )
@@ -112,7 +113,7 @@ def create_app(*, store: Store, api_token: str) -> FastAPI:
 
     @app.get(
         "/v1/alerts/{alert_id}",
-        dependencies=authenticated,
+        dependencies=can_read,
         tags=["alerts"],
         summary="One alert with the log lines behind it",
         responses={404: {"description": "No such alert"}},

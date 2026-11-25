@@ -12,6 +12,7 @@ import pytest
 
 from vigil import __version__
 from vigil.cli import main
+from vigil.keys import Scope
 
 if TYPE_CHECKING:
     from vigil.storage.store import Store
@@ -219,27 +220,76 @@ def test_db_upgrade_builds_the_tables(
 UNUSED_DATABASE = "postgresql+psycopg://vigil:vigil@127.0.0.1:1/vigil"  # never contacted
 
 
-@pytest.mark.parametrize("token", [None, "too-short"], ids=["missing", "too-short"])
-def test_serve_refuses_to_start_without_a_strong_token(
-    token: str | None, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
-) -> None:
-    pytest.importorskip("fastapi")
-    if token is None:
-        monkeypatch.delenv("VIGIL_API_TOKEN", raising=False)
-    else:
-        monkeypatch.setenv("VIGIL_API_TOKEN", token)
-
-    assert main(["serve", "--database-url", UNUSED_DATABASE]) == 2
-    err = capsys.readouterr().err
-    assert "VIGIL_API_TOKEN" in err
-    assert "secrets.token_urlsafe" in err  # tells the user how to make a good one
-
-
 def test_serve_listens_only_on_this_machine_by_default(monkeypatch: pytest.MonkeyPatch) -> None:
     uvicorn = pytest.importorskip("uvicorn")
     started: list[dict[str, object]] = []
     monkeypatch.setattr(uvicorn, "run", lambda app, **options: started.append(options))
-    monkeypatch.setenv("VIGIL_API_TOKEN", "t" * 40)
 
     assert main(["serve", "--database-url", UNUSED_DATABASE]) == 0
     assert started == [{"host": "127.0.0.1", "port": 8000}]
+
+
+# --- Managing API keys --------------------------------------------------------------------
+
+
+def test_keys_create_prints_the_key_once(
+    store: Store, database_url: str, capsys: pytest.CaptureFixture[str]
+) -> None:
+    command = [
+        "keys",
+        "create",
+        "web-01-shipper",
+        "--scope",
+        "ingest",
+        "--database-url",
+        database_url,
+    ]
+
+    assert main(command) == 0
+    captured = capsys.readouterr()
+    key = store.authenticate(captured.out.strip())  # stdout holds only the key itself
+    assert key is not None
+    assert key.scopes == frozenset({Scope.INGEST})
+    assert "cannot show it again" in captured.err
+
+
+def test_keys_create_needs_a_scope(database_url: str) -> None:
+    with pytest.raises(SystemExit) as exit_info:
+        main(["keys", "create", "no-scope", "--database-url", database_url])
+    assert exit_info.value.code == 2
+
+
+def test_keys_create_refuses_a_duplicate_name(
+    store: Store, database_url: str, capsys: pytest.CaptureFixture[str]
+) -> None:
+    store.create_api_key("analyst", {Scope.READ})
+    assert (
+        main(["keys", "create", "analyst", "--scope", "read", "--database-url", database_url]) == 2
+    )
+    assert "already exists" in capsys.readouterr().err
+
+
+def test_keys_list_never_shows_secrets(
+    store: Store, database_url: str, capsys: pytest.CaptureFixture[str]
+) -> None:
+    token = store.create_api_key("analyst", {Scope.READ})
+    store.create_api_key("old-shipper", {Scope.INGEST})
+    store.revoke_api_key("old-shipper")
+
+    assert main(["keys", "list", "--database-url", database_url]) == 0
+    out = capsys.readouterr().out
+
+    analyst_row = next(line for line in out.splitlines() if line.startswith("analyst"))
+    shipper_row = next(line for line in out.splitlines() if line.startswith("old-shipper"))
+    assert "read" in analyst_row and "active" in analyst_row
+    assert "revoked" in shipper_row
+    assert token.split("_", 2)[2] not in out
+
+
+def test_keys_revoke(store: Store, database_url: str, capsys: pytest.CaptureFixture[str]) -> None:
+    token = store.create_api_key("lost-laptop", {Scope.READ})
+
+    assert main(["keys", "revoke", "lost-laptop", "--database-url", database_url]) == 0
+    assert store.authenticate(token) is None
+    assert main(["keys", "revoke", "lost-laptop", "--database-url", database_url]) == 2
+    assert "no active key" in capsys.readouterr().err

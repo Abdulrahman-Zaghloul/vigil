@@ -29,9 +29,9 @@ Every threshold is configurable, and each alert carries the exact log lines that
 - [x] Command-line scanner
 - [x] PostgreSQL storage
 - [x] Ingestion and alerts API
-- [ ] API hardening: keys, signatures, rate limits
+- [ ] API hardening: scoped keys, rate limits, size limits
 - [ ] Continuous detection worker
-- [ ] Alert notifications
+- [ ] Signed alert notifications
 - [ ] Web attack detection
 - [ ] Docker and attack-replay demo
 - [ ] Threat model and design records
@@ -75,22 +75,24 @@ CRITICAL  2026-11-17 03:10:00 -> 03:10:40 UTC  ssh-success-after-failures
 
 ```bash
 pip install "vigil[api]"
-# Windows PowerShell: $env:VIGIL_API_TOKEN = python -c "import secrets; print(secrets.token_urlsafe(32))"
-export VIGIL_API_TOKEN=$(python -c "import secrets; print(secrets.token_urlsafe(32))")
-vigil serve                    # http://127.0.0.1:8000 - interactive documentation at /docs
+vigil db upgrade
+vigil keys create web-01-shipper --scope ingest   # prints a key once: give it to the log shipper
+vigil keys create analyst --scope read            # for people and dashboards reading alerts
+vigil serve                                       # http://127.0.0.1:8000 - interactive docs at /docs
 ```
 
-| Endpoint | Purpose |
-| --- | --- |
-| `GET /health`, `GET /health/ready` | Is it running? Can it reach the database? (no token needed) |
-| `POST /v1/events` | Send up to 1,000 raw log lines; SSH login attempts are parsed and stored |
-| `GET /v1/alerts?min_severity=high&limit=50` | Alerts, newest first |
-| `GET /v1/alerts/{id}` | One alert with the exact log lines behind it |
+| Endpoint | Scope | Purpose |
+| --- | --- | --- |
+| `GET /health`, `GET /health/ready` | none | Is it running? Can it reach the database? |
+| `POST /v1/events` | `ingest` | Send up to 1,000 raw log lines; SSH login attempts are parsed and stored |
+| `GET /v1/alerts?min_severity=high&limit=50` | `read` | Alerts, newest first |
+| `GET /v1/alerts/{id}` | `read` | One alert with the exact log lines behind it |
 
-Data endpoints require `Authorization: Bearer <VIGIL_API_TOKEN>`, and the server refuses
-to start with a token shorter than 32 characters. It listens on 127.0.0.1 unless told
-otherwise. Per-client keys, request signing and rate limits are next on the roadmap; until
-then, keep the API on a trusted network.
+Requests carry `Authorization: Bearer <key>`. Each client gets its own key with only the
+scopes it needs, so a key stolen from a server can send events but never read alerts.
+Vigil stores only a SHA-256 hash of each key, and `vigil keys revoke NAME` disables one
+immediately. The server listens on 127.0.0.1 unless told otherwise; rate limits and
+request size limits are next on the roadmap.
 
 ## Development
 
