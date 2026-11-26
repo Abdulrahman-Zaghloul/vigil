@@ -11,6 +11,7 @@ from factories import DATA, scan
 from fastapi.testclient import TestClient
 
 from vigil.api.app import MAX_LINE_LENGTH, MAX_LINES, create_app
+from vigil.api.limits import Limits
 from vigil.keys import Scope
 from vigil.storage.store import Store
 
@@ -198,3 +199,97 @@ def test_an_unknown_alert_is_not_found(client: TestClient, analyst: dict[str, st
 def test_the_api_documents_itself(client: TestClient) -> None:
     paths = client.get("/openapi.json").json()["paths"]
     assert {"/v1/events", "/v1/alerts", "/v1/alerts/{alert_id}"} <= set(paths)
+
+
+# --- Abuse limits -------------------------------------------------------------------------
+
+
+class FakeClock:
+    def __init__(self) -> None:
+        self.now = 1_000.0
+
+    def __call__(self) -> float:
+        return self.now
+
+
+@pytest.fixture
+def clock() -> FakeClock:
+    return FakeClock()
+
+
+@pytest.fixture
+def strict_client(store: Store, clock: FakeClock) -> Iterator[TestClient]:
+    """An API with tiny limits, so tests can reach them in a few requests."""
+    limits = Limits(
+        burst=3,
+        per_second=0.1,
+        failed_auth_burst=3,
+        failed_auth_per_second=0.1,
+        max_body_bytes=1_024,
+    )
+    with TestClient(create_app(store=store, limits=limits, clock=clock)) as test_client:
+        yield test_client
+
+
+def test_each_key_has_its_own_rate_limit(
+    strict_client: TestClient, analyst: dict[str, str], shipper: dict[str, str]
+) -> None:
+    statuses = [strict_client.get("/v1/alerts", headers=analyst).status_code for _ in range(4)]
+    limited = strict_client.get("/v1/alerts", headers=analyst)
+
+    assert statuses == [200, 200, 200, 429]
+    assert int(limited.headers["retry-after"]) >= 1
+    assert ingest(strict_client, shipper, ["x"]).status_code == 200  # other keys unaffected
+
+
+def test_a_limited_key_recovers_as_time_passes(
+    strict_client: TestClient, analyst: dict[str, str], clock: FakeClock
+) -> None:
+    for _ in range(4):
+        strict_client.get("/v1/alerts", headers=analyst)
+    clock.now += 10  # 0.1 tokens per second: one new request after 10 seconds
+    assert strict_client.get("/v1/alerts", headers=analyst).status_code == 200
+
+
+def test_repeated_bad_keys_from_one_address_are_throttled(
+    strict_client: TestClient, analyst: dict[str, str], clock: FakeClock
+) -> None:
+    bad = bearer("vigil_0123456789ab_" + "x" * 43)
+    statuses = [strict_client.get("/v1/alerts", headers=bad).status_code for _ in range(4)]
+
+    assert statuses == [401, 401, 401, 429]
+    # While throttled, the address is refused before any key is even looked up...
+    assert strict_client.get("/v1/alerts", headers=analyst).status_code == 429
+    clock.now += 10
+    # ...and it recovers once its budget refills.
+    assert strict_client.get("/v1/alerts", headers=analyst).status_code == 200
+
+
+def test_oversized_bodies_are_refused_before_anything_reads_them(
+    strict_client: TestClient, shipper: dict[str, str]
+) -> None:
+    response = ingest(strict_client, shipper, ["x" * 2_000])
+
+    assert response.status_code == 413
+    assert "1024 bytes" in response.json()["detail"]
+
+
+def test_oversized_bodies_without_a_declared_length_are_refused_too(
+    strict_client: TestClient, shipper: dict[str, str]
+) -> None:
+    def stream() -> Iterator[bytes]:  # chunked upload: no Content-Length header at all
+        yield b'{"lines": ["'
+        for _ in range(100):
+            yield b"x" * 100
+        yield b'"]}'
+
+    response = strict_client.post(
+        "/v1/events", content=stream(), headers={**shipper, "content-type": "application/json"}
+    )
+    assert response.status_code == 413
+
+
+def test_responses_carry_protective_headers(client: TestClient) -> None:
+    headers = client.get("/health").headers
+    assert headers["x-content-type-options"] == "nosniff"
+    assert headers["cache-control"] == "no-store"

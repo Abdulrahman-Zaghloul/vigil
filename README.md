@@ -29,7 +29,7 @@ Every threshold is configurable, and each alert carries the exact log lines that
 - [x] Command-line scanner
 - [x] PostgreSQL storage
 - [x] Ingestion and alerts API
-- [ ] API hardening: scoped keys, rate limits, size limits
+- [x] API hardening: scoped keys, rate limits, size limits
 - [ ] Continuous detection worker
 - [ ] Signed alert notifications
 - [ ] Web attack detection
@@ -91,8 +91,18 @@ vigil serve                                       # http://127.0.0.1:8000 - inte
 Requests carry `Authorization: Bearer <key>`. Each client gets its own key with only the
 scopes it needs, so a key stolen from a server can send events but never read alerts.
 Vigil stores only a SHA-256 hash of each key, and `vigil keys revoke NAME` disables one
-immediately. The server listens on 127.0.0.1 unless told otherwise; rate limits and
-request size limits are next on the roadmap.
+immediately. The server listens on 127.0.0.1 unless told otherwise.
+
+Abuse limits apply before any endpoint runs:
+
+| Limit | Default | When exceeded |
+| --- | --- | --- |
+| Requests per key | burst of 50, then 10 per second | `429` with `Retry-After` |
+| Bad or missing keys per client address | 10, then 10 per minute | `429`, before the key is even looked up |
+| Request body size | 2 MiB, counted even for chunked uploads | `413` |
+
+Every response also carries `X-Content-Type-Options: nosniff`, `Cache-Control: no-store`
+and `Referrer-Policy: no-referrer`.
 
 ## Development
 
